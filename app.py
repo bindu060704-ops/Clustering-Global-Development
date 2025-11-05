@@ -1,34 +1,23 @@
+# global_development_clustering_app.py
+
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.impute import SimpleImputer
-from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
 from sklearn.metrics import silhouette_score
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
 
-# --- Page Config ---
-st.set_page_config(page_title="Clustering Global Development", layout="wide")
-st.title("🌍 Clustering Global Development Data")
+# --- Page Setup ---
+st.set_page_config(page_title="Global Development Clustering", layout="wide")
+st.title("🌍 Global Development Clustering App")
 
-# --- Sidebar Model Selection ---
-st.sidebar.header("🔧 Model Settings")
-model_choice = st.sidebar.selectbox("Choose Clustering Model", ["KMeans", "Hierarchical", "DBSCAN"])
-show_best_model = st.sidebar.button("🏆 Show Best Model")
-
-# --- File Upload ---
-uploaded_file = st.file_uploader("Upload your Excel file", type=["xlsx"])
-if uploaded_file:
-    df = pd.read_excel(uploaded_file)
-
-    # --- Preprocessing ---
-    df.drop(columns=['Number of Records'], errors="ignore", inplace=True)
-    if 'Country' in df.columns:
-        le = LabelEncoder()
-        df['Country_encoded'] = le.fit_transform(df['Country'])
-        df.drop(['Country'], axis=1, inplace=True)
+# --- Load and Clean Data ---
+@st.cache_data
+def load_data():
+    df = pd.read_excel('World_development_mesurement.xlsx')
+    df = df.drop(columns=["Number of Records"], errors="ignore")
 
     for col in df.columns:
         df[col] = df[col].astype(str).str.replace(r"[\$,%]", "", regex=True)
@@ -37,91 +26,153 @@ if uploaded_file:
         except:
             pass
 
+    if 'Country' in df.columns:
+        le = LabelEncoder()
+        df['Country_encoded'] = le.fit_transform(df['Country'])
+        df['Country_encoded'] = df['Country_encoded'].astype(float)
+        df.drop('Country', axis=1, inplace=True)
+
+    cat_cols = df.select_dtypes(exclude=["number"]).columns.tolist()
+    cat_cols = [col for col in cat_cols if col != "Country_encoded"]
+    for col in cat_cols:
+        df[col] = pd.factorize(df[col])[0].astype(float)
+
     num_cols = df.select_dtypes(include="number").columns.tolist()
-    cat_cols = df.select_dtypes(exclude="number").columns.tolist()
-
     if num_cols:
-        df[num_cols] = SimpleImputer(strategy="median").fit_transform(df[num_cols])
-    if cat_cols:
-        cat_cols = [col for col in cat_cols if not df[col].isnull().all()]
-        df[cat_cols] = SimpleImputer(strategy="most_frequent").fit_transform(df[cat_cols])
+        df[num_cols] = df[num_cols].fillna(df[num_cols].median())
 
-    # --- Scaling & PCA ---
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(df[num_cols])
-    pca = PCA()
-    data_pca = pca.fit_transform(X_scaled)
-    var = np.cumsum(np.round(pca.explained_variance_ratio_, decimals=4)*100)
+    return df
 
-    st.subheader("📊 PCA Variance Explained")
-    fig, ax = plt.subplots()
-    ax.plot(var, color='red')
-    ax.set_xlabel('Components')
-    ax.set_ylabel('Cumulative Variance (%)')
-    st.pyplot(fig)
+df = load_data()
 
-    n_components = st.slider("Select number of PCA components", 2, len(var), 15)
-    data_pca = data_pca[:, :n_components]
+# --- Preprocessing ---
+numeric_df = df.select_dtypes(include=['float64', 'int64'])
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(numeric_df)
+X_scaled = np.nan_to_num(X_scaled)
 
-    # --- Clustering ---
-    st.subheader("🔗 Clustering Visualization")
+# --- Sidebar Options ---
+model_choice = st.sidebar.selectbox("Choose Clustering Model", ["KMeans", "DBSCAN", "Hierarchical"])
+n_clusters = st.sidebar.slider("Number of Clusters", min_value=2, max_value=10, value=4)
+eps = st.sidebar.slider("DBSCAN eps", min_value=0.5, max_value=5.0, value=1.5)
+min_samples = st.sidebar.slider("DBSCAN min_samples", min_value=3, max_value=10, value=5)
 
-    def plot_clusters(labels, title):
-        fig, ax = plt.subplots()
-        sns.scatterplot(x=data_pca[:, 0], y=data_pca[:, 1], hue=labels, palette="Set1", ax=ax)
-        ax.set_title(title)
-        st.pyplot(fig)
+# --- Clustering ---
+if model_choice == "KMeans":
+    model = KMeans(n_clusters=n_clusters, random_state=42)
+    labels = model.fit_predict(X_scaled)
+elif model_choice == "DBSCAN":
+    model = DBSCAN(eps=eps, min_samples=min_samples)
+    labels = model.fit_predict(X_scaled)
+elif model_choice == "Hierarchical":
+    model = AgglomerativeClustering(n_clusters=n_clusters)
+    labels = model.fit_predict(X_scaled)
 
-    def cluster_summary(labels):
-        df['Cluster'] = labels
-        st.write("📋 Cluster Summary")
-        st.dataframe(df.groupby('Cluster').mean().round(2))
+df['Cluster'] = labels
 
-    silhouette_scores = {}
+# --- Silhouette Score Evaluation ---
+def get_silhouette(X, labels):
+    try:
+        return round(silhouette_score(X, labels), 3)
+    except:
+        return 'N/A'
 
-    if model_choice == "KMeans":
-        k = st.sidebar.slider("Number of clusters (KMeans)", 2, 10, 3)
-        kmeans = KMeans(n_clusters=k, random_state=42)
-        labels = kmeans.fit_predict(data_pca)
-        sil_score = silhouette_score(data_pca, labels)
-        silhouette_scores["KMeans"] = sil_score
-        plot_clusters(labels, "KMeans Clustering")
-        cluster_summary(labels)
+if st.button(" Evaluate Clustering"):
+    score = get_silhouette(X_scaled, labels)
+    st.subheader(" Silhouette Score")
+    st.write(f"{model_choice} Score:** {score}")
 
-    elif model_choice == "Hierarchical":
-        h = st.sidebar.slider("Number of clusters (Hierarchical)", 2, 10, 4)
-        hc = AgglomerativeClustering(n_clusters=h, linkage='ward')
-        labels = hc.fit_predict(data_pca)
-        sil_score = silhouette_score(data_pca, labels)
-        silhouette_scores["Hierarchical"] = sil_score
-        plot_clusters(labels, "Hierarchical Clustering")
-        cluster_summary(labels)
+# --- Best Model Selection (Silhouette Only) ---
+if st.button(" Select Best Model by Silhouette Score"):
+    km = KMeans(n_clusters=n_clusters, random_state=42).fit(X_scaled)
+    db = DBSCAN(eps=eps, min_samples=min_samples).fit(X_scaled)
+    hc = AgglomerativeClustering(n_clusters=n_clusters).fit(X_scaled)
 
-    elif model_choice == "DBSCAN":
-        eps = st.sidebar.slider("Epsilon (DBSCAN)", 0.1, 1.0, 0.5)
-        min_samples = st.sidebar.slider("Min Samples (DBSCAN)", 1, 10, 5)
-        dbscan = DBSCAN(eps=eps, min_samples=min_samples)
-        labels = dbscan.fit_predict(data_pca)
-        try:
-            sil_score = silhouette_score(data_pca, labels)
-        except:
-            sil_score = None
-        silhouette_scores["DBSCAN"] = sil_score
-        plot_clusters(labels, "DBSCAN Clustering")
-        cluster_summary(labels)
+    db_valid = len(set(db.labels_)) > 1 and -1 in db.labels_
+    db_filtered = db.labels_ != -1 if db_valid else None
 
-    # --- Model Comparison ---
-    st.subheader("📈 Model Comparison")
-    for model, score in silhouette_scores.items():
-        st.write(f"{model}: {score if score is not None else 'Could not be calculated'}")
+    km_sil = get_silhouette(X_scaled, km.labels_)
+    db_sil = get_silhouette(X_scaled[db_filtered], db.labels_[db_filtered]) if db_valid else -1
+    hc_sil = get_silhouette(X_scaled, hc.labels_)
 
-    # --- Best Model ---
-    if show_best_model:
-        valid_scores = {k: v for k, v in silhouette_scores.items() if v is not None}
-        if valid_scores:
-            best_model = max(valid_scores, key=valid_scores.get)
-            st.success(f"🏅 Best Model: {best_model} with Silhouette Score {valid_scores[best_model]:.3f}")
-        else:
-            st.warning("No valid silhouette scores to determine best model.")
+    scores = {
+        'KMeans': km_sil if isinstance(km_sil, float) else -1,
+        'DBSCAN': db_sil if isinstance(db_sil, float) else -1,
+        'Hierarchical': hc_sil if isinstance(hc_sil, float) else -1
+    }
+
+    best_model = max(scores, key=scores.get)
+    best_score = scores[best_model]
+
+    st.subheader(" Best Model Based on Silhouette Score")
+    st.write(f"*Best Model:* {best_model}")
+    st.write(f"*Silhouette Score:* {best_score}")
+
+# --- Cluster Assignments ---
+st.subheader("🌍 Cluster Assignments")
+if 'Country_encoded' in df.columns:
+    st.dataframe(df[['Country_encoded', 'Cluster']].sort_values(by='Cluster'))
 else:
-    st.info("📂 Please upload a dataset to begin.")
+    st.dataframe(df[['Cluster']].sort_values(by='Cluster'))
+
+# --- Cluster Summary ---
+st.subheader(" Cluster Summary")
+summary_raw = df[df['Cluster'] != -1].groupby('Cluster')[numeric_df.columns].mean()
+valid_cols = summary_raw.columns[~summary_raw.isnull().any()]
+summary = summary_raw[valid_cols].round(2)
+st.dataframe(summary)
+
+# --- Cluster Profiling ---
+st.subheader(" Cluster Profiles")
+percentiles = df[numeric_df.columns].quantile([0.25, 0.5, 0.75])
+for cluster_id, row in summary.iterrows():
+    st.markdown(f"### Cluster {cluster_id}")
+    description = []
+    for col in valid_cols:
+        val = row[col]
+        if pd.isna(val): continue
+        p25 = percentiles.loc[0.25, col]
+        p75 = percentiles.loc[0.75, col]
+        if val <= p25:
+            label = f"Low {col}"
+        elif val <= p75:
+            label = f"Moderate {col}"
+        else:
+            label = f"High {col}"
+        description.append(label)
+    st.write("• " + "\n• ".join(description) if description else "No interpretable indicators.")
+
+# --- PCA Visualization ---
+st.subheader("Cluster Visualization (PCA)")
+pca = PCA(n_components=2)
+X_pca = pca.fit_transform(X_scaled)
+
+fig, ax = plt.subplots(figsize=(10, 6))
+scatter = ax.scatter(
+    X_pca[:, 0], X_pca[:, 1],
+    c=df['Cluster'],
+    cmap='tab10',
+    s=60,
+    edgecolor='k'
+)
+ax.set_xlabel("Principal Component 1", fontsize=12)
+ax.set_ylabel("Principal Component 2", fontsize=12)
+ax.set_title("Clusters Visualized in PCA Space", fontsize=14)
+ax.grid(True)
+
+unique_clusters = np.unique(df['Cluster'])
+handles = [
+    plt.Line2D([0], [0], marker='o', color='w',
+               label=f'Cluster {int(c)}',
+               markerfacecolor=plt.cm.tab10(c / 10),
+               markersize=10)
+    for c in unique_clusters if c != -1
+]
+if -1 in unique_clusters:
+    handles.append(
+        plt.Line2D([0], [0], marker='x', color='gray',
+                   label='Noise (DBSCAN)',
+                   markersize=10)
+    )
+ax.legend(handles=handles, title="Clusters", loc="best")
+st.pyplot(fig)
